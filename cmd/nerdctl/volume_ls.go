@@ -26,6 +26,8 @@ import (
 	"text/template"
 
 	"github.com/containerd/containerd/pkg/progress"
+	"github.com/containerd/nerdctl/pkg/api/cmd"
+	"github.com/containerd/nerdctl/pkg/api/types"
 	"github.com/containerd/nerdctl/pkg/inspecttypes/native"
 	"github.com/sirupsen/logrus"
 
@@ -33,23 +35,17 @@ import (
 )
 
 func newVolumeLsCommand() *cobra.Command {
+	volumeLsOptions := &types.VolumeLsOptions{}
 	volumeLsCommand := &cobra.Command{
 		Use:           "ls",
 		Aliases:       []string{"list"},
 		Short:         "List volumes",
-		RunE:          volumeLsAction,
+		RunE:          func(cmd *cobra.Command, args []string) error { return volumeLsAction(cmd, volumeLsOptions, args) },
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
 
-	volumeLsCommand.Flags().BoolP("quiet", "q", false, "Only display volume names")
-	// Alias "-f" is reserved for "--filter"
-	volumeLsCommand.Flags().String("format", "", "Format the output using the given go template")
-	volumeLsCommand.Flags().BoolP("size", "s", false, "Display the disk usage of volumes. Can be slow with volumes having loads of directories.")
-	volumeLsCommand.RegisterFlagCompletionFunc("format", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		return []string{"json", "table", "wide"}, cobra.ShellCompDirectiveNoFileComp
-	})
-	volumeLsCommand.Flags().StringSliceP("filter", "f", []string{}, "Filter matches volumes based on given conditions")
+	cmd.VolumeLsFlags(volumeLsCommand, volumeLsOptions)
 	return volumeLsCommand
 }
 
@@ -63,18 +59,10 @@ type volumePrintable struct {
 	// TODO: "Links"
 }
 
-func volumeLsAction(cmd *cobra.Command, args []string) error {
-	quiet, err := cmd.Flags().GetBool("quiet")
-	if err != nil {
-		return err
-	}
-	volumeSize, err := cmd.Flags().GetBool("size")
-	if err != nil {
-		return err
-	}
-	if quiet && volumeSize {
+func volumeLsAction(cmd *cobra.Command, opts *types.VolumeLsOptions, args []string) error {
+	if opts.Quiet && opts.Size {
 		logrus.Warn("cannot use --size and --quiet together, ignoring --size")
-		volumeSize = false
+		opts.Size = false
 	}
 	filters, err := cmd.Flags().GetStringSlice("filter")
 	if err != nil {
@@ -84,14 +72,14 @@ func volumeLsAction(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(sizeFilterFuncs) > 0 && quiet {
+	if len(sizeFilterFuncs) > 0 && opts.Quiet {
 		logrus.Warn("cannot use --filter=size and --quiet together, ignoring --filter=size")
 		sizeFilterFuncs = nil
 	}
-	if len(sizeFilterFuncs) > 0 && !volumeSize {
+	if len(sizeFilterFuncs) > 0 && !opts.Size {
 		logrus.Warn("should use --filter=size and --size together")
 		cmd.Flags().Set("size", "true")
-		volumeSize = true
+		opts.Size = true
 	}
 	w := cmd.OutOrStdout()
 	var tmpl *template.Template
@@ -102,8 +90,8 @@ func volumeLsAction(cmd *cobra.Command, args []string) error {
 	switch format {
 	case "", "table", "wide":
 		w = tabwriter.NewWriter(cmd.OutOrStdout(), 4, 8, 4, ' ', 0)
-		if !quiet {
-			if volumeSize {
+		if !opts.Quiet {
+			if opts.Size {
 				fmt.Fprintln(w, "VOLUME NAME\tDIRECTORY\tSIZE")
 			} else {
 				fmt.Fprintln(w, "VOLUME NAME\tDIRECTORY")
@@ -112,7 +100,7 @@ func volumeLsAction(cmd *cobra.Command, args []string) error {
 	case "raw":
 		return errors.New("unsupported format: \"raw\"")
 	default:
-		if quiet {
+		if opts.Quiet {
 			return errors.New("format and quiet must not be specified together")
 		}
 		var err error
@@ -122,7 +110,7 @@ func volumeLsAction(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	vols, err := getVolumes(cmd)
+	vols, err := getVolumes(cmd, opts.Size)
 	if err != nil {
 		return err
 	}
@@ -141,7 +129,7 @@ func volumeLsAction(cmd *cobra.Command, args []string) error {
 		if v.Labels != nil {
 			p.Labels = formatLabels(*v.Labels)
 		}
-		if volumeSize {
+		if opts.Size {
 			p.Size = progress.Bytes(v.Size).String()
 		}
 		if tmpl != nil {
@@ -152,9 +140,9 @@ func volumeLsAction(cmd *cobra.Command, args []string) error {
 			if _, err = fmt.Fprintf(w, b.String()+"\n"); err != nil {
 				return err
 			}
-		} else if quiet {
+		} else if opts.Quiet {
 			fmt.Fprintln(w, p.Name)
-		} else if volumeSize {
+		} else if opts.Size {
 			fmt.Fprintf(w, "%s\t%s\t%s\n", p.Name, p.Mountpoint, p.Size)
 		} else {
 			fmt.Fprintf(w, "%s\t%s\n", p.Name, p.Mountpoint)
@@ -166,12 +154,8 @@ func volumeLsAction(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func getVolumes(cmd *cobra.Command) (map[string]native.Volume, error) {
+func getVolumes(cmd *cobra.Command, volumeSize bool) (map[string]native.Volume, error) {
 	volStore, err := getVolumeStore(cmd)
-	if err != nil {
-		return nil, err
-	}
-	volumeSize, err := cmd.Flags().GetBool("size")
 	if err != nil {
 		return nil, err
 	}
